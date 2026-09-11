@@ -6,6 +6,7 @@ import re
 from .config import VENDOR_DIR
 from .notion_api import iter_children, get_page_title
 from .richtext import rich_text_to_html, code_rich_text_to_data
+from .link_metadata import fetch_link_metadata
 
 # Populated by collect_headings() before rendering, consumed by the
 # table_of_contents block renderer.
@@ -186,6 +187,47 @@ CALLOUT_COLORS = {
 }
 
 
+_LINK_METADATA_CACHE = {}
+
+
+def render_link_card(url, caption_html=""):
+    """Bookmark/embed/link_preview blocks only carry a bare URL in the API —
+    Notion's own rich card (favicon/title/description) comes from a crawl it
+    already did when the link was pasted, which the API doesn't expose. We
+    replicate that by fetching the URL ourselves at export time; if that
+    fails (unreachable, blocked, non-HTML) we fall back to a plain link."""
+    caption_block = f'<div class="code-caption">{caption_html}</div>' if caption_html else ""
+    if not url:
+        return caption_block
+
+    if url not in _LINK_METADATA_CACHE:
+        _LINK_METADATA_CACHE[url] = fetch_link_metadata(url)
+    meta = _LINK_METADATA_CACHE[url]
+
+    safe_url = html.escape(url, quote=True)
+    if not meta:
+        return f'<p class="media-link">🔗 <a href="{safe_url}" target="_blank">{html.escape(url)}</a></p>{caption_block}'
+
+    favicon_html = ""
+    if meta.get("favicon"):
+        favicon_html = f'<img class="link-card-favicon" src="{html.escape(meta["favicon"], quote=True)}" alt=""/>'
+    desc_html = ""
+    if meta.get("description"):
+        desc_html = f'<div class="link-card-desc">{html.escape(meta["description"])}</div>'
+    thumb_html = ""
+    if meta.get("image"):
+        thumb_html = f'<div class="link-card-thumb"><img src="{html.escape(meta["image"], quote=True)}" alt=""/></div>'
+
+    return (
+        f'<a class="link-card" href="{safe_url}" target="_blank" rel="noopener">'
+        f'<div class="link-card-body">'
+        f'<div class="link-card-title-row">{favicon_html}<span class="link-card-title">{html.escape(meta["title"])}</span></div>'
+        f"{desc_html}"
+        f'<div class="link-card-url">{html.escape(meta["url"])}</div>'
+        f"</div>{thumb_html}</a>{caption_block}"
+    )
+
+
 def render_block(block):
     block_type = block.get("type")
     children = block.get("_children", [])
@@ -257,7 +299,8 @@ def render_block(block):
     if block_type in ("bookmark", "embed", "link_preview"):
         data = block[block_type]
         url = data.get("url", "")
-        return f'<p class="media-link">🔗 <a href="{html.escape(url, quote=True)}" target="_blank">{html.escape(url)}</a></p>'
+        caption = rich_text_to_html(data.get("caption", [])) if block_type != "link_preview" else ""
+        return render_link_card(url, caption)
 
     if block_type == "equation":
         expression = block["equation"].get("expression", "")
@@ -575,6 +618,72 @@ PAGE_TEMPLATE = """<!doctype html>
   .media-link, .unsupported, .child-page {{ color: #787774; font-size: 0.9em; }}
   .equation-block {{ background: #f7f6f3; padding: 10px 14px; border-radius: 6px; font-family: monospace; }}
 
+  .mention-chip {{
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    background: rgba(55, 53, 47, 0.08);
+    border-radius: 4px;
+    padding: 1px 6px 1px 4px;
+    text-decoration: none;
+    font-weight: 500;
+  }}
+  a .mention-chip {{ color: inherit; }}
+  .mention-chip:hover {{ background: rgba(55, 53, 47, 0.16); }}
+  .mention-icon {{ font-size: 0.9em; }}
+
+  .inline-link-with-icon {{
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    vertical-align: -3px;
+  }}
+  .link-favicon {{ width: 14px; height: 14px; flex-shrink: 0; }}
+
+  .link-card {{
+    display: flex;
+    border: 1px solid #e3e2e0;
+    border-radius: 6px;
+    margin: 0.6em 0;
+    overflow: hidden;
+    text-decoration: none !important;
+    color: inherit;
+    break-inside: avoid;
+  }}
+  .link-card:hover {{ background: #f7f6f3; }}
+  .link-card-body {{ flex: 1; min-width: 0; padding: 10px 14px; }}
+  .link-card-title-row {{ display: flex; align-items: center; gap: 6px; margin-bottom: 4px; }}
+  .link-card-favicon {{ width: 16px; height: 16px; flex-shrink: 0; }}
+  .link-card-title {{
+    font-weight: 600;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }}
+  .link-card-desc {{
+    font-size: 0.85em;
+    color: #787774;
+    margin-bottom: 6px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+  }}
+  .link-card-url {{
+    font-size: 0.8em;
+    color: #9b9a97;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }}
+  .link-card-thumb {{
+    width: 120px;
+    flex-shrink: 0;
+    background: #f7f6f3;
+  }}
+  .link-card-thumb img {{ width: 100%; height: 100%; object-fit: cover; display: block; }}
+
   .toc {{ margin: 0.4em 0; }}
   .toc-item {{ padding: 4px 0; }}
   .toc-item a {{ color: #37352f; text-decoration: none; border-bottom: 1px solid #e3e2e0; }}
@@ -630,7 +739,7 @@ PAGE_TEMPLATE = """<!doctype html>
     }}
 
     /* Small elements are safe (and nicer) to keep intact on one page. */
-    table.notion-table, .callout {{
+    table.notion-table, .callout, .link-card {{
       break-inside: avoid;
       page-break-inside: avoid;
     }}
